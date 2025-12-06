@@ -213,6 +213,9 @@ print_welcome() {
 # 参数: 无
 # 返回值: 0表示支持，1表示不支持
 check_system() {
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                          步骤: 系统检查"
+    log_message "INFO" "================================================================="
     if [ -z "$(which apt-get 2>/dev/null)" ]; then
         log_message "ERROR" "这个脚本只支持 Ubuntu/Debian 系统!"
         return 1
@@ -225,6 +228,9 @@ check_system() {
 # 参数: 无
 # 返回值: 0表示权限通过，1表示权限不足
 check_permissions() {
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                          步骤: 权限检查"
+    log_message "INFO" "================================================================="
     # 检查是否为root用户
     if [ "$(id -u)" -eq 0 ]; then
         log_message "WARN" "您正在以root用户身份运行此脚本"
@@ -267,6 +273,9 @@ check_permissions() {
 # 参数: 无
 # 返回值: 无
 update_system_packages() {
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                          步骤: 系统包更新"
+    log_message "INFO" "================================================================="
     log_message "INFO" "📥 正在更新系统包..."
     log_message "INFO" "============================= 系统更新 ============================"
     
@@ -292,6 +301,9 @@ update_system_packages() {
 # 参数: 无
 # 返回值: 无
 check_dependencies() {
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                          步骤: 依赖检查"
+    log_message "INFO" "================================================================="
     # 只保留必要的依赖项
     local required_deps=("curl" "wget" "sudo")
     local missing_deps=()
@@ -413,7 +425,11 @@ show_progress() {
 # 返回值: 无
 select_timezone() {
     local TZ_CHOICE
-
+    
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                          步骤: 时区选择"
+    log_message "INFO" "================================================================="
+    
     log_message "INFO" "请选择时区:"
     log_message "INFO" "1) ${DEFAULT_TIMEZONE} (默认)"
     log_message "INFO" "2) Asia/Tokyo"
@@ -441,6 +457,30 @@ select_timezone() {
     log_message "INFO" "选择的时区: $GLOBAL_TIMEZONE"
 }
 
+# 选择安装方式函数
+# 参数: 无
+# 返回值: 无
+select_installation_method() {
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                          步骤: 安装方式选择"
+    log_message "INFO" "================================================================="
+    
+    log_message "INFO" "请选择安装方式:"
+    log_message "INFO" "1) npm (推荐用于开发环境)"
+    log_message "INFO" "2) Docker (推荐用于生产环境)"
+    read -p "请输入您的选择 (1/2) [默认: 2]: " INSTALL_METHOD
+    log_message "INFO" "请选择安装方式: $INSTALL_METHOD"
+    
+    # 设置默认值和验证输入
+    if [ -z "$INSTALL_METHOD" ]; then
+        INSTALL_METHOD="2"  # 默认选择Docker安装
+        log_message "INFO" "使用默认安装方式: Docker"
+    elif [[ ! $INSTALL_METHOD =~ ^[12]$ ]]; then
+        log_message "ERROR" "无效的选择，将使用默认安装方式: Docker"
+        INSTALL_METHOD="2"
+    fi
+}
+
 # ========================== Docker 安装模块 ==========================
 
 # Docker 安装函数
@@ -448,7 +488,7 @@ select_timezone() {
 # 返回值: 无
 install_docker() {
     log_message "INFO" "================================================================="
-    log_message "INFO" "                     Docker 安装模式"
+    log_message "INFO" "                          步骤: Docker安装模式"
     log_message "INFO" "================================================================="
 
     # 安装 Docker 引擎
@@ -541,7 +581,7 @@ start_n8n() {
 # 返回值: 无
 install_with_npm() {
     log_message "INFO" "================================================================="
-    log_message "INFO" "                       npm 安装模式"
+    log_message "INFO" "                          步骤: npm安装模式"
     log_message "INFO" "================================================================="
 
     # 询问是否使用 nvm
@@ -939,6 +979,9 @@ create_docker_compose_file() {
 # 参数: 无
 # 返回值: 无
 create_n8n_data_directory() {
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                          步骤: 数据目录创建"
+    log_message "INFO" "================================================================="
     log_message "INFO" "正在创建 n8n_data 目录..."
     execute "mkdir -p ./n8n_data"
 }
@@ -947,6 +990,9 @@ create_n8n_data_directory() {
 # 参数: 无
 # 返回值: 无
 start_services() {
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                          步骤: 服务启动"
+    log_message "INFO" "================================================================="
     log_message "INFO" "正在使用 Docker Compose 启动 n8n..."
     execute "docker-compose up -d"
 
@@ -1025,77 +1071,91 @@ configure_database_postgresql() {
     log_message "INFO" "PostgreSQL 数据库使用方式选择: $DB_CHOICE"
 
     # 收集所有 PostgreSQL 参数
-    log_message "INFO" "请输入 PostgreSQL 数据库信息:"
-
-    # 根据用户选择设置不同的默认值和提示信息
     case $DB_CHOICE in
-        1)  # 使用本地已安装的 PostgreSQL
-            read -p "数据库主机 (默认: localhost): " local_db_host
-            local_db_host=${local_db_host:-localhost}
-            ;;
-        2)  # 使用自定义的 PostgreSQL (外部或远程)
-            read -p "数据库主机 (必填): " local_db_host
-            while [ -z "$local_db_host" ]; do
-                log_message "ERROR" "数据库主机不能为空!"
-                read -p "数据库主机 (必填): " local_db_host
-            done
-            ;;
         3)  # 通过 Docker 安装 PostgreSQL
-            read -p "数据库主机 (默认: localhost): " local_db_host
-            local_db_host=${local_db_host:-localhost}
-            ;;
-        *)
-            log_message "ERROR" "无效的选择!"
-            return 1
-            ;;
-    esac
-    log_message "INFO" "PostgreSQL 数据库信息: 数据库主机: $local_db_host"
-
-    # 验证数据库端口
-    while true; do
-        read -p "数据库端口 (默认: 5432): " local_db_port_tmp
-        local_db_port=${local_db_port_tmp:-5432}  # 设置默认端口
-
-        if validate_input "port" "$local_db_port" "数据库端口"; then
+            log_message "INFO" "将使用 Docker 自动安装 PostgreSQL 数据库..."
+            log_message "INFO" "正在设置默认数据库配置 (可在 .env 文件中修改):"
+            
+            # 自动设置默认值，无需用户输入
+            local_db_host="localhost"
+            local_db_port="5432"
+            local_db_name="n8n"
+            local_db_user="postgres"
+            
+            # 自动生成随机密码
+            local_db_password=$(openssl rand -base64 12)
+            
+            log_message "INFO" "PostgreSQL 数据库信息: 数据库主机: $local_db_host"
             log_message "INFO" "PostgreSQL 数据库信息: 数据库端口: $local_db_port"
-            break
-        fi
-    done
-
-    # 验证数据库名称
-    while true; do
-        read -p "数据库名称 (默认: n8n): " local_db_name_tmp
-        local_db_name=${local_db_name_tmp:-n8n}  # 设置默认数据库名称
-
-        if validate_input "database_name" "$local_db_name" "数据库名称"; then
             log_message "INFO" "PostgreSQL 数据库信息: 数据库名称: $local_db_name"
-            break
-        fi
-    done
+            log_message "INFO" "PostgreSQL 数据库信息: 数据库用户: $local_db_user"
+            log_message "INFO" "PostgreSQL 数据库信息: 数据库密码: **** (将保存在 .env 文件中)"
+            log_message "INFO" "提示: 所有数据库配置将保存在 .env 文件中，您可以随时修改。"
+            printf "\n\n"
+            ;;
+        
+        *)  # 使用已安装的 PostgreSQL (本地或远程)
+            log_message "INFO" "请输入 PostgreSQL 数据库信息:"
+            
+            # 根据用户选择设置不同的默认值和提示信息
+            case $DB_CHOICE in
+                1)  # 使用本地已安装的 PostgreSQL
+                    read -p "数据库主机 (默认: localhost): " local_db_host
+                    local_db_host=${local_db_host:-localhost}
+                    ;;
+                2)  # 使用自定义的 PostgreSQL (外部或远程)
+                    read -p "数据库主机 (必填): " local_db_host
+                    while [ -z "$local_db_host" ]; do
+                        log_message "ERROR" "数据库主机不能为空!"
+                        read -p "数据库主机 (必填): " local_db_host
+                    done
+                    ;;
+            esac
+            log_message "INFO" "PostgreSQL 数据库信息: 数据库主机: $local_db_host"
 
-    # 设置默认用户
-    case $DB_CHOICE in
-        1)  # 使用本地已安装的 PostgreSQL
-            read -p "数据库用户 (默认: postgres): " local_db_user
-            local_db_user=${local_db_user:-postgres}
-            ;;
-        2)  # 使用自定义的 PostgreSQL (外部或远程)
-            read -p "数据库用户 (必填): " local_db_user
-            while [ -z "$local_db_user" ]; do
-                log_message "ERROR" "数据库用户不能为空!"
-                read -p "数据库用户 (必填): " local_db_user
+            # 验证数据库端口
+            while true; do
+                read -p "数据库端口 (默认: 5432): " local_db_port_tmp
+                local_db_port=${local_db_port_tmp:-5432}  # 设置默认端口
+
+                if validate_input "port" "$local_db_port" "数据库端口"; then
+                    log_message "INFO" "PostgreSQL 数据库信息: 数据库端口: $local_db_port"
+                    break
+                fi
             done
-            ;;
-        3)  # 通过 Docker 安装 PostgreSQL
-            read -p "数据库用户 (默认: postgres): " local_db_user
-            local_db_user=${local_db_user:-postgres}
+
+            # 验证数据库名称
+            while true; do
+                read -p "数据库名称 (默认: n8n): " local_db_name_tmp
+                local_db_name=${local_db_name_tmp:-n8n}  # 设置默认数据库名称
+
+                if validate_input "database_name" "$local_db_name" "数据库名称"; then
+                    log_message "INFO" "PostgreSQL 数据库信息: 数据库名称: $local_db_name"
+                    break
+                fi
+            done
+
+            # 设置默认用户
+            case $DB_CHOICE in
+                1)  # 使用本地已安装的 PostgreSQL
+                    read -p "数据库用户 (默认: postgres): " local_db_user
+                    local_db_user=${local_db_user:-postgres}
+                    ;;
+                2)  # 使用自定义的 PostgreSQL (外部或远程)
+                    read -p "数据库用户 (必填): " local_db_user
+                    while [ -z "$local_db_user" ]; do
+                        log_message "ERROR" "数据库用户不能为空!"
+                        read -p "数据库用户 (必填): " local_db_user
+                    done
+                    ;;
+            esac
+            log_message "INFO" "PostgreSQL 数据库信息: 数据库用户: $local_db_user"
+
+            local_db_password=$(read_password)
+            log_message "INFO" "PostgreSQL 数据库信息: 数据库密码: ****"
+            printf "\n\n"
             ;;
     esac
-    log_message "INFO" "PostgreSQL 数据库信息: 数据库用户: $local_db_user"
-
-    local_db_password=$(read_password)
-    log_message "INFO" "PostgreSQL 数据库信息: 数据库密码: ****"
-    printf "\n\n"
 
     # 处理数据库配置
     case $DB_CHOICE in
@@ -1150,45 +1210,64 @@ configure_database_mysql() {
     fi
 
     # 收集所有 MySQL 参数
-    log_message "INFO" "请输入 MySQL 数据库信息:"
-
     if [ "$USE_EXISTING_MYSQL" = "y" ] || [ "$USE_EXISTING_MYSQL" = "Y" ]; then
+        # 使用已安装的 MySQL/MariaDB
+        log_message "INFO" "请输入 MySQL 数据库信息:"
         read -p "数据库主机 (默认: localhost): " local_db_host
         local_db_host=${local_db_host:-localhost}  # 设置默认主机为 localhost
+        log_message "INFO" "MySQL 数据库信息: 数据库主机: $local_db_host"
+
+        # 验证数据库端口
+        while true; do
+            read -p "数据库端口 (默认: 3306): " local_db_port_tmp
+            local_db_port=${local_db_port_tmp:-3306}  # 设置默认端口
+
+            if validate_input "port" "$local_db_port" "数据库端口"; then
+                log_message "INFO" "MySQL 数据库信息: 数据库端口: $local_db_port"
+                break
+            fi
+        done
+
+        # 验证数据库名称
+        while true; do
+            read -p "数据库名称 (默认: n8n): " local_db_name_tmp
+            local_db_name=${local_db_name_tmp:-n8n}  # 设置默认数据库名称
+
+            if validate_input "database_name" "$local_db_name" "数据库名称"; then
+                log_message "INFO" "MySQL 数据库信息: 数据库名称: $local_db_name"
+                break
+            fi
+        done
+
+        read -p "数据库用户 (默认: root): " local_db_user
+        local_db_user=${local_db_user:-root}  # 设置默认用户
+        log_message "INFO" "MySQL 数据库信息: 数据库用户: $local_db_user"
+
+        local_db_password=$(read_password)
+        log_message "INFO" "MySQL 数据库信息: 数据库密码: ****"
+        printf "\n\n"
     else
-        read -p "数据库主机: " local_db_host
+        # 通过 Docker 安装 MySQL
+        log_message "INFO" "将使用 Docker 自动安装 MySQL 数据库..."
+        log_message "INFO" "正在设置默认数据库配置 (可在 .env 文件中修改):"
+        
+        # 自动设置默认值，无需用户输入
+        local_db_host="localhost"
+        local_db_port="3306"
+        local_db_name="n8n"
+        local_db_user="root"
+        
+        # 自动生成随机密码
+        local_db_password=$(openssl rand -base64 12)
+        
+        log_message "INFO" "MySQL 数据库信息: 数据库主机: $local_db_host"
+        log_message "INFO" "MySQL 数据库信息: 数据库端口: $local_db_port"
+        log_message "INFO" "MySQL 数据库信息: 数据库名称: $local_db_name"
+        log_message "INFO" "MySQL 数据库信息: 数据库用户: $local_db_user"
+        log_message "INFO" "MySQL 数据库信息: 数据库密码: **** (将保存在 .env 文件中)"
+        log_message "INFO" "提示: 所有数据库配置将保存在 .env 文件中，您可以随时修改。"
+        printf "\n\n"
     fi
-    log_message "INFO" "MySQL 数据库信息: 数据库主机: $local_db_host"
-
-    # 验证数据库端口
-    while true; do
-        read -p "数据库端口 (默认: 3306): " local_db_port_tmp
-        local_db_port=${local_db_port_tmp:-3306}  # 设置默认端口
-
-        if validate_input "port" "$local_db_port" "数据库端口"; then
-            log_message "INFO" "MySQL 数据库信息: 数据库端口: $local_db_port"
-            break
-        fi
-    done
-
-    # 验证数据库名称
-    while true; do
-        read -p "数据库名称 (默认: n8n): " local_db_name_tmp
-        local_db_name=${local_db_name_tmp:-n8n}  # 设置默认数据库名称
-
-        if validate_input "database_name" "$local_db_name" "数据库名称"; then
-            log_message "INFO" "MySQL 数据库信息: 数据库名称: $local_db_name"
-            break
-        fi
-    done
-
-    read -p "数据库用户 (默认: root): " local_db_user
-    local_db_user=${local_db_user:-root}  # 设置默认用户
-    log_message "INFO" "MySQL 数据库信息: 数据库用户: $local_db_user"
-
-    local_db_password=$(read_password)
-    log_message "INFO" "MySQL 数据库信息: 数据库密码: ****"
-    printf "\n\n"
 
     # 处理已安装的 MySQL 逻辑
     if [ "$USE_EXISTING_MYSQL" = "y" ] || [ "$USE_EXISTING_MYSQL" = "Y" ]; then
@@ -1414,6 +1493,9 @@ handle_docker_mysql() {
 # 返回值: 0表示成功，非0表示失败
 configure_database() {
     # 询问数据库选择
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                          步骤: 数据库配置"
+    log_message "INFO" "================================================================="
     log_message "INFO" "请选择数据库类型:"
     log_message "INFO" "1) SQLite (默认，无需凭证)"
     log_message "INFO" "2) PostgreSQL (需要数据库凭证)"
@@ -1443,7 +1525,7 @@ configure_database() {
 # 返回值: 无
 configure_n8n_parameters() {
     log_message "INFO" "================================================================="
-    log_message "INFO" "                     n8n 参数配置"
+    log_message "INFO" "                          步骤: n8n 参数配置"
     log_message "INFO" "================================================================="
     
     # 配置N8N_HOST
@@ -1509,11 +1591,7 @@ main() {
     select_timezone
 
     # 询问安装方式
-    log_message "INFO" "请选择安装方式:"
-    log_message "INFO" "1) npm (推荐用于开发环境)"
-    log_message "INFO" "2) Docker (推荐用于生产环境)"
-    read -p "请输入您的选择 (1/2): " INSTALL_METHOD
-    log_message "INFO" "请选择安装方式: $INSTALL_METHOD"
+    select_installation_method
 
     case $INSTALL_METHOD in
         1)
