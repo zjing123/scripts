@@ -981,7 +981,7 @@ configure_database_sqlite() {
 # 返回值: 0表示成功，非0表示失败
 configure_database_postgresql() {
     local PG_INSTALLED=false
-    local USE_EXISTING_PG="n"
+    local DB_CHOICE="3"
     local local_db_host
     local local_db_port
     local local_db_name
@@ -993,29 +993,62 @@ configure_database_postgresql() {
         PG_INSTALLED=true
     fi
 
-    # 如果本地已安装 PostgreSQL，询问用户选择
+    # 询问用户选择数据库方式
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                     PostgreSQL 数据库配置"
+    log_message "INFO" "================================================================="
+    
     if [ "$PG_INSTALLED" = true ]; then
         log_message "INFO" "检测到本地已安装 PostgreSQL!"
-        while true; do
-            read -p "是否使用已安装的 PostgreSQL？(y/n，默认: n): " USE_EXISTING_PG_TMP
-            USE_EXISTING_PG=${USE_EXISTING_PG_TMP:-n}
-
-            if validate_input "yes_no" "$USE_EXISTING_PG" "使用已安装的 PostgreSQL"; then
-                log_message "INFO" "是否使用已安装的 PostgreSQL: $USE_EXISTING_PG"
-                break
-            fi
-        done
+        log_message "INFO" "请选择 PostgreSQL 数据库使用方式:"
+        log_message "INFO" "1) 使用本地已安装的 PostgreSQL"
+        log_message "INFO" "2) 使用自定义的 PostgreSQL (外部或远程)"
+        log_message "INFO" "3) 通过 Docker 安装 PostgreSQL (推荐)"
+        read -p "请输入您的选择 (1/2/3，默认: 3): " DB_CHOICE_TMP
+        DB_CHOICE=${DB_CHOICE_TMP:-3}
+    else
+        log_message "INFO" "未检测到本地已安装 PostgreSQL!"
+        log_message "INFO" "请选择 PostgreSQL 数据库使用方式:"
+        log_message "INFO" "1) 使用自定义的 PostgreSQL (外部或远程)"
+        log_message "INFO" "2) 通过 Docker 安装 PostgreSQL (推荐)"
+        read -p "请输入您的选择 (1/2，默认: 2): " DB_CHOICE_TMP
+        DB_CHOICE=${DB_CHOICE_TMP:-2}
+        
+        # 调整选项编号以匹配下面的case语句
+        if [ "$DB_CHOICE" = "1" ]; then
+            DB_CHOICE="2"
+        else
+            DB_CHOICE="3"
+        fi
     fi
+    
+    log_message "INFO" "PostgreSQL 数据库使用方式选择: $DB_CHOICE"
 
     # 收集所有 PostgreSQL 参数
     log_message "INFO" "请输入 PostgreSQL 数据库信息:"
 
-    if [ "$USE_EXISTING_PG" = "y" ] || [ "$USE_EXISTING_PG" = "Y" ]; then
-        read -p "数据库主机 (默认: localhost): " local_db_host
-        local_db_host=${local_db_host:-localhost}
-    else
-        read -p "数据库主机: " local_db_host
-    fi
+    # 根据用户选择设置不同的默认值和提示信息
+    case $DB_CHOICE in
+        1)  # 使用本地已安装的 PostgreSQL
+            read -p "数据库主机 (默认: localhost): " local_db_host
+            local_db_host=${local_db_host:-localhost}
+            ;;
+        2)  # 使用自定义的 PostgreSQL (外部或远程)
+            read -p "数据库主机 (必填): " local_db_host
+            while [ -z "$local_db_host" ]; do
+                log_message "ERROR" "数据库主机不能为空!"
+                read -p "数据库主机 (必填): " local_db_host
+            done
+            ;;
+        3)  # 通过 Docker 安装 PostgreSQL
+            read -p "数据库主机 (默认: localhost): " local_db_host
+            local_db_host=${local_db_host:-localhost}
+            ;;
+        *)
+            log_message "ERROR" "无效的选择!"
+            return 1
+            ;;
+    esac
     log_message "INFO" "PostgreSQL 数据库信息: 数据库主机: $local_db_host"
 
     # 验证数据库端口
@@ -1040,20 +1073,47 @@ configure_database_postgresql() {
         fi
     done
 
-    read -p "数据库用户 (默认: postgres): " local_db_user
-    local_db_user=${local_db_user:-postgres}  # 设置默认用户
+    # 设置默认用户
+    case $DB_CHOICE in
+        1)  # 使用本地已安装的 PostgreSQL
+            read -p "数据库用户 (默认: postgres): " local_db_user
+            local_db_user=${local_db_user:-postgres}
+            ;;
+        2)  # 使用自定义的 PostgreSQL (外部或远程)
+            read -p "数据库用户 (必填): " local_db_user
+            while [ -z "$local_db_user" ]; do
+                log_message "ERROR" "数据库用户不能为空!"
+                read -p "数据库用户 (必填): " local_db_user
+            done
+            ;;
+        3)  # 通过 Docker 安装 PostgreSQL
+            read -p "数据库用户 (默认: postgres): " local_db_user
+            local_db_user=${local_db_user:-postgres}
+            ;;
+    esac
     log_message "INFO" "PostgreSQL 数据库信息: 数据库用户: $local_db_user"
 
     local_db_password=$(read_password)
     log_message "INFO" "PostgreSQL 数据库信息: 数据库密码: ****"
     printf "\n\n"
 
-    # 处理已安装的 PostgreSQL 逻辑
-    if [ "$USE_EXISTING_PG" = "y" ] || [ "$USE_EXISTING_PG" = "Y" ]; then
-        handle_existing_postgresql "$timezone" "$local_db_host" "$local_db_port" "$local_db_name" "$local_db_user" "$local_db_password"
-    else
-        handle_docker_postgresql "$timezone" "$local_db_host" "$local_db_port" "$local_db_name" "$local_db_user" "$local_db_password"
-    fi
+    # 处理数据库配置
+    case $DB_CHOICE in
+        1)  # 使用本地已安装的 PostgreSQL
+            handle_existing_postgresql "$local_db_host" "$local_db_port" "$local_db_name" "$local_db_user" "$local_db_password"
+            ;;
+        2)  # 使用自定义的 PostgreSQL (外部或远程)
+            # 使用与现有数据库相同的处理逻辑
+            handle_existing_postgresql "$local_db_host" "$local_db_port" "$local_db_name" "$local_db_user" "$local_db_password"
+            ;;
+        3)  # 通过 Docker 安装 PostgreSQL
+            handle_docker_postgresql "$local_db_host" "$local_db_port" "$local_db_name" "$local_db_user" "$local_db_password"
+            ;;
+        *)
+            log_message "ERROR" "无效的选择!"
+            return 1
+            ;;
+    esac
 
     return 0
 }
@@ -1141,12 +1201,11 @@ configure_database_mysql() {
 }
 
 # 处理已安装的 PostgreSQL 辅助函数
-# 参数: $1 - 时区
-#       $2 - 数据库主机
-#       $3 - 数据库端口
-#       $4 - 数据库名称
-#       $5 - 数据库用户
-#       $6 - 数据库密码
+# 参数: $1 - 数据库主机
+#       $2 - 数据库端口
+#       $3 - 数据库名称
+#       $4 - 数据库用户
+#       $5 - 数据库密码
 # 返回值: 无
 handle_existing_postgresql() {
     local db_host="$1"
@@ -1228,17 +1287,16 @@ handle_existing_postgresql() {
     create_env_file "existing_postgresql"
 
     # 准备 docker-compose.yml 内容
-    local docker_compose_content=$(generate_docker_compose_content "postgres_existing" "$timezone")
+    local docker_compose_content=$(generate_docker_compose_content "postgres_existing")
     create_docker_compose_file "$docker_compose_content"
 }
 
 # 处理 Docker PostgreSQL 辅助函数
-# 参数: $1 - 时区
-#       $2 - 数据库主机
-#       $3 - 数据库端口
-#       $4 - 数据库名称
-#       $5 - 数据库用户
-#       $6 - 数据库密码
+# 参数: $1 - 数据库主机
+#       $2 - 数据库端口
+#       $3 - 数据库名称
+#       $4 - 数据库用户
+#       $5 - 数据库密码
 # 返回值: 无
 handle_docker_postgresql() {
     local db_host="$1"
@@ -1265,7 +1323,7 @@ handle_docker_postgresql() {
         create_init_data_script
 
         # Create docker-compose.yml with PostgreSQL service
-        local docker_compose_content=$(generate_docker_compose_content "postgres_docker" "$timezone")
+        local docker_compose_content=$(generate_docker_compose_content "postgres_docker")
         create_docker_compose_file "$docker_compose_content"
     else
         # External PostgreSQL
@@ -1273,7 +1331,7 @@ handle_docker_postgresql() {
         create_env_file "existing_postgresql"
 
         # Create docker-compose.yml content
-        local docker_compose_content=$(generate_docker_compose_content "postgres_existing" "$timezone")
+        local docker_compose_content=$(generate_docker_compose_content "postgres_existing")
         create_docker_compose_file "$docker_compose_content"
     fi
 }
