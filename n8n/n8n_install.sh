@@ -13,8 +13,8 @@ readonly SCRIPT_VERSION="1.2.0"
 
 # -------------------------- n8n 配置 --------------------------
 readonly N8N_VERSION="latest"
-readonly N8N_HOST="localhost"
-readonly N8N_PORT="5678"
+N8N_HOST="localhost"
+N8N_PORT="5678"
 
 # -------------------------- 依赖版本 --------------------------
 readonly DOCKER_COMPOSE_VERSION="v2.23.3"
@@ -247,8 +247,15 @@ check_permissions() {
     fi
 
     # 检查是否有sudo权限
-    if ! sudo -n true 2>/dev/null; then
+    # 方法1：检查用户是否属于sudo或admin组
+    if ! id -nG "$USER" | grep -qw "sudo\|admin"; then
         log_message "ERROR" "当前用户没有sudo权限，无法完成安装"
+        return 1
+    fi
+
+    # 方法2：辅助检查 - 测试sudo是否可用（可能需要密码）
+    if ! sudo -v >/dev/null 2>&1; then
+        log_message "ERROR" "sudo命令不可用，无法完成安装"
         return 1
     fi
 
@@ -1373,6 +1380,33 @@ configure_database() {
     esac
 }
 
+# 配置n8n参数函数
+# 参数: 无
+# 返回值: 无
+configure_n8n_parameters() {
+    log_message "INFO" "================================================================="
+    log_message "INFO" "                     n8n 参数配置"
+    log_message "INFO" "================================================================="
+    
+    # 配置N8N_HOST
+    log_message "INFO" "请输入N8N主机名 (默认: ${N8N_HOST}):"
+    read -p "N8N主机名: " USER_HOST
+    if [ -n "$USER_HOST" ]; then
+        N8N_HOST="$USER_HOST"
+    fi
+    log_message "INFO" "N8N主机名设置为: ${N8N_HOST}"
+    
+    # 配置N8N_PORT
+    log_message "INFO" "请输入N8N端口 (默认: ${N8N_PORT}):"
+    read -p "N8N端口: " USER_PORT
+    if [ -n "$USER_PORT" ]; then
+        N8N_PORT="$USER_PORT"
+    fi
+    log_message "INFO" "N8N端口设置为: ${N8N_PORT}"
+    
+    # 在这里可以添加更多n8n参数配置
+}
+
 # 安装完成提示函数
 # 参数: 无
 # 返回值: 无
@@ -1425,10 +1459,14 @@ main() {
 
     case $INSTALL_METHOD in
         1)
+            # 配置n8n参数
+            configure_n8n_parameters
             install_with_npm || handle_error $? $LINENO "install_with_npm"
             print_install_completion || handle_error $? $LINENO "print_install_completion"
             ;;
         2)
+            # 配置n8n参数
+            configure_n8n_parameters
             install_docker || handle_error $? $LINENO "install_docker"
             configure_database || handle_error $? $LINENO "configure_database"
             create_n8n_data_directory || handle_error $? $LINENO "create_n8n_data_directory"
