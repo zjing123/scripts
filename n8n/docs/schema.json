@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "method": {"type": "string", "enum": ["docker", "node"]},
+    "db": {"type": "string", "enum": ["sqlite", "postgres"]},
+    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+    "timezone": {"type": "string"},
+    "n8nVersion": {"type": "string"},
+    "webhookUrl": {"type": "string"},
+    "basicAuth": {
+      "type": "object",
+      "properties": {
+        "user": {"type": "string"},
+        "password": {"type": "string"}
+      }
+    },
+    "postgres": {
+      "type": "object",
+      "properties": {
+        "host": {"type": "string"},
+        "port": {"type": "integer"},
+        "database": {"type": "string"},
+        "user": {"type": "string"},
+        "password": {"type": "string"},
+        "passwordFile": {"type": "string"},
+        "schema": {"type": "string"},
+        "poolSize": {"type": "integer"},
+        "connectionTimeout": {"type": "integer"},
+        "idleConnectionTimeout": {"type": "integer"},
+        "ssl": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "ca": {"type": "string"},
+            "cert": {"type": "string"},
+            "key": {"type": "string"},
+            "rejectUnauthorized": {"type": "boolean"}
+          }
+        }
+      }
+    }
+  },
+  "required": ["method", "db", "port"],
+  "additionalProperties": true
+}
+
