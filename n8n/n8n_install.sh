@@ -8,8 +8,8 @@
 # ========================== 变量定义部分 ==========================
 
 # -------------------------- 脚本配置 --------------------------
-readonly SCRIPT_NAME="n8n_installer.sh"
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_NAME="n8n_install.sh"
+readonly SCRIPT_VERSION="1.3.0"
 
 # -------------------------- n8n 配置 --------------------------
 readonly N8N_VERSION="latest"
@@ -25,6 +25,8 @@ readonly POSTGRES_VERSION="16"
 # -------------------------- 路径配置 --------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LOG_FILE="$SCRIPT_DIR/n8n_install.log"
+LOG_TARGET="$LOG_FILE"
+declare -a ROLLBACK_ACTIONS=()
 
 # -------------------------- 其他配置 --------------------------
 readonly DEFAULT_TIMEZONE="Asia/Shanghai"
@@ -46,6 +48,11 @@ declare -A COLORS=(
 # -------------------------- 全局开关 --------------------------
 DRY_RUN=false
 DEBUG=${DEBUG:-false}
+CURL_COMMON_OPTS="-fL --retry 3 --retry-delay 2 --connect-timeout 10"
+DOCKER_COMPOSE_CMD="docker compose"
+NON_INTERACTIVE=false
+PRESET_DB=""
+SESSION_ID="$(date +%Y%m%d%H%M%S)-$$"
 
 # -------------------------- 数据库相关全局变量 - 尽量减少使用 --------------------------
 # 注意：这些变量将在后续版本中逐步替换为参数传递
@@ -56,11 +63,8 @@ DEBUG=${DEBUG:-false}
 # 参数: $@ - 命令行参数
 # 返回值: 无
 initialize() {
-    # 检查是否有 dry-run 参数
-    if [ "$1" = "--dry-run" ] || [ "$1" = "-d" ]; then
-        DRY_RUN=true
-        # DRY-RUN 模式下默认开启 DEBUG
-        DEBUG=${DEBUG:-true}
+    parse_args "$@"
+    if [ "$DRY_RUN" = true ]; then
         log_message "INFO" "[DRY-RUN MODE] 脚本将只打印执行命令，不会实际执行"
     fi
 
@@ -71,6 +75,11 @@ initialize() {
     trap 'handle_error $? $LINENO "$BASH_COMMAND"' ERR
 
     log_message "DEBUG" "初始化模块完成"
+    if ! { mkdir -p "$SCRIPT_DIR" 2>/dev/null && : > "$LOG_FILE" 2>/dev/null; }; then
+        LOG_TARGET="/tmp/n8n_install.log"
+        : > "$LOG_TARGET"
+    fi
+    compute_docker_compose_cmd
 }
 
 # 日志消息函数 - 支持结构化日志
@@ -119,8 +128,7 @@ log_message() {
     # 输出到控制台
     printf "%b\n" "$console_output"
 
-    # 输出到日志文件
-    printf "%s\n" "$file_output" >> "$LOG_FILE"
+    printf "%s\n" "$file_output" >> "$LOG_TARGET"
 }
 
 # 错误处理函数
@@ -140,7 +148,7 @@ handle_error() {
     log_message "ERROR" "日志文件: $LOG_FILE"
     log_message "ERROR" "====================================================================================="
     log_message "ERROR" "请检查日志文件以获取详细错误信息"
-
+    do_rollback
     exit "$exit_code"
 }
 
@@ -191,8 +199,94 @@ execute() {
     if [ "$DRY_RUN" = true ]; then
         log_message "INFO" "[DRY-RUN] 将要执行命令: $@"
     else
-        eval "$@"
+        bash -c "$*"
     fi
+}
+
+push_rollback() {
+    local action="$1"
+    ROLLBACK_ACTIONS+=("$action")
+}
+
+do_rollback() {
+    if [ "$DRY_RUN" = true ]; then
+        return 0
+    fi
+    local count=${#ROLLBACK_ACTIONS[@]:-0}
+    if [ "$count" -eq 0 ]; then
+        return 0
+    fi
+    log_message "WARN" "开始执行回滚，共 ${count} 项"
+    for (( idx=count-1; idx>=0; idx-- )); do
+        local act="${ROLLBACK_ACTIONS[$idx]}"
+        log_message "INFO" "回滚: $act"
+        bash -c "$act" || true
+    done
+}
+
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run|-d)
+                DRY_RUN=true
+                DEBUG=${DEBUG:-true}
+                ;;
+            --non-interactive)
+                NON_INTERACTIVE=true
+                ;;
+            --method)
+                shift
+                case "$1" in
+                    docker) INSTALL_METHOD="2" ;;
+                    npm) INSTALL_METHOD="1" ;;
+                esac
+                ;;
+            --db)
+                shift
+                PRESET_DB="$1"
+                ;;
+            --host)
+                shift
+                N8N_HOST="$1"
+                ;;
+            --port)
+                shift
+                N8N_PORT="$1"
+                ;;
+            --timezone)
+                shift
+                GLOBAL_TIMEZONE="$1"
+                ;;
+            --debug)
+                DEBUG=true
+                ;;
+        esac
+        shift || break
+    done
+}
+
+compute_docker_compose_cmd() {
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+    fi
+}
+
+ensure_port_free() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        if ss -tulpen | grep -q ":${port} "; then
+            log_message "ERROR" "端口 ${port} 已被占用"
+            return 1
+        fi
+    elif command -v lsof >/dev/null 2>&1; then
+        if lsof -i :"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+            log_message "ERROR" "端口 ${port} 已被占用"
+            return 1
+        fi
+    fi
+    return 0
 }
 
 # ========================== 系统检查模块 ==========================
@@ -204,6 +298,7 @@ print_welcome() {
     log_message "INFO" "================================================================="
     log_message "INFO" "                      n8n 一键安装脚本"
     log_message "INFO" "                        版本: ${SCRIPT_VERSION}"
+    log_message "INFO" "                        会话: ${SESSION_ID}"
     log_message "INFO" "================================================================="
     log_message "INFO" "                      支持: Ubuntu/Debian 系统"
     log_message "INFO" "================================================================="
@@ -305,7 +400,7 @@ check_dependencies() {
     log_message "INFO" "                          步骤: 依赖检查"
     log_message "INFO" "================================================================="
     # 只保留必要的依赖项
-    local required_deps=("curl" "wget" "sudo")
+    local required_deps=("curl" "wget" "sudo" "bc" "openssl" "lsb_release" "gpg" "tee")
     local missing_deps=()
 
     log_message "INFO" "📋 正在检查系统依赖..."
@@ -326,7 +421,7 @@ check_dependencies() {
     if [ ${#missing_deps[@]} -gt 0 ]; then
         log_message "INFO" "📥 正在安装缺失的依赖: ${missing_deps[*]}"
         show_progress "正在安装依赖" 10
-        execute "sudo apt-get install -y ${missing_deps[*]}"
+        execute "sudo apt-get install -y --no-install-recommends ${missing_deps[*]}"
         log_message "INFO" "✓ 所有依赖已安装完成!"
     else
         log_message "INFO" "✓ 所有依赖已满足!"
@@ -398,7 +493,11 @@ show_progress() {
     printf "%b" "${COLORS[YELLOW]}$message ${COLORS[NC]}"
 
     # Calculate sleep time per progress step
-    local sleep_time=$(printf "scale=2; %s / %s" "$duration" "$bar_length" | bc)
+    local sleep_time
+    sleep_time=$(printf "scale=2; %s / %s" "$duration" "$bar_length" | bc 2>/dev/null || echo "0.05")
+    if [ -z "$sleep_time" ]; then
+        sleep_time="0.05"
+    fi
 
     while [ $progress -lt $bar_length ]; do
         # Calculate percentage completed
@@ -411,7 +510,7 @@ show_progress() {
         # Update progress bar
         printf "\r%b" "${COLORS[YELLOW]}$message [${bar}] ${completed}%${COLORS[NC]}"
 
-        sleep $sleep_time
+        sleep "$sleep_time"
         progress=$((progress + 1))
     done
 
@@ -468,7 +567,11 @@ select_installation_method() {
     log_message "INFO" "请选择安装方式:"
     log_message "INFO" "1) npm (推荐用于开发环境)"
     log_message "INFO" "2) Docker (推荐用于生产环境)"
-    read -p "请输入您的选择 (1/2) [默认: 2]: " INSTALL_METHOD
+    if [ "$NON_INTERACTIVE" = true ] && [ -n "${INSTALL_METHOD:-}" ]; then
+        :
+    else
+        read -p "请输入您的选择 (1/2) [默认: 2]: " INSTALL_METHOD
+    fi
     log_message "INFO" "请选择安装方式: $INSTALL_METHOD"
     
     # 设置默认值和验证输入
@@ -493,21 +596,37 @@ install_docker() {
 
     # 安装 Docker 引擎
     log_message "INFO" "正在安装 Docker 引擎..."
-    execute "sudo apt-get install -y ca-certificates curl gnupg lsb-release"
+    execute "sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release"
     execute "sudo mkdir -p /etc/apt/keyrings"
-    execute "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg"
-    execute "echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable\" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null"
+    execute "curl ${CURL_COMMON_OPTS} https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg"
+    if [ -f /etc/debian_version ]; then
+        execute "echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable\" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null"
+    else
+        execute "echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable\" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null"
+    fi
     execute "sudo apt-get update"
     execute "sudo apt-get install -y docker-ce docker-ce-cli containerd.io"
 
+    log_message "INFO" "正在安装 Docker Compose 插件..."
+    execute "sudo apt-get install -y docker-compose-plugin"
+    compute_docker_compose_cmd
+
     # 安装 Docker Compose
-    log_message "INFO" "正在安装 Docker Compose ${DOCKER_COMPOSE_VERSION}..."
-    execute "sudo curl -L \"https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)\" -o /usr/local/bin/docker-compose"
-    execute "sudo chmod +x /usr/local/bin/docker-compose"
+    if ! ${DOCKER_COMPOSE_CMD} version >/dev/null 2>&1; then
+        log_message "INFO" "正在获取最新 Docker Compose 版本..."
+        local latest_tag
+        latest_tag=$(curl ${CURL_COMMON_OPTS} https://api.github.com/repos/docker/compose/releases/latest 2>/dev/null | grep -Po '"tag_name": "\K[^"]+')
+        latest_tag=${latest_tag:-"v2.23.3"}
+        log_message "INFO" "正在安装 Docker Compose ${latest_tag}..."
+        execute "sudo curl ${CURL_COMMON_OPTS} \"https://github.com/docker/compose/releases/download/${latest_tag}/docker-compose-$(uname -s)-$(uname -m)\" -o /usr/local/bin/docker-compose"
+        execute "sudo chmod +x /usr/local/bin/docker-compose"
+        compute_docker_compose_cmd
+    fi
 
     # 将用户添加到 docker 组，避免使用 sudo
     log_message "INFO" "正在将当前用户添加到 docker 组..."
     execute "sudo usermod -aG docker $USER"
+    compute_docker_compose_cmd
     log_message "DEBUG" "Docker 安装模块完成"
 }
 
@@ -518,7 +637,7 @@ install_docker() {
 # 返回值: 无
 install_nvm() {
     log_message "INFO" "正在安装 nvm ${NVM_VERSION}..."
-    execute "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh | bash"
+    execute "curl ${CURL_COMMON_OPTS} https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh | bash"
     execute "source ~/.bashrc"
 }
 
@@ -558,9 +677,8 @@ install_pnpm_optionally() {
 install_n8n_globally() {
     local pnpm_installed="$1"
     log_message "INFO" "正在全局安装 n8n ${N8N_VERSION}..."
-    
     if [ "$pnpm_installed" = "true" ]; then
-        execute "pnpm install -g n8n"
+        execute "pnpm add -g n8n"
     else
         execute "npm install -g n8n"
     fi
@@ -637,11 +755,26 @@ create_env_file() {
             ;;
 
         "docker_postgresql")
-            ENV_CONTENT="POSTGRES_USER=${DB_USER}\n"
-            ENV_CONTENT+="POSTGRES_PASSWORD=${DB_PASSWORD}\n"
-            ENV_CONTENT+="POSTGRES_DB=${DB_NAME}\n"
-            ENV_CONTENT+="POSTGRES_NON_ROOT_USER=${DB_USER}\n"
-            ENV_CONTENT+="POSTGRES_NON_ROOT_PASSWORD=${DB_PASSWORD}\n"
+            ENV_CONTENT="# PostgreSQL Docker 容器配置
+POSTGRES_USER=${DB_USER}
+POSTGRES_PASSWORD=${DB_PASSWORD}
+POSTGRES_DB=${DB_NAME}
+
+# 非 root 用户配置（与主用户相同）
+POSTGRES_NON_ROOT_USER=${DB_USER}
+POSTGRES_NON_ROOT_PASSWORD=${DB_PASSWORD}
+
+# n8n 数据库连接配置 - 自动使用上方的 PostgreSQL 配置
+DB_TYPE=postgresdb
+DB_POSTGRESDB_HOST=postgres
+DB_POSTGRESDB_PORT=5432
+DB_POSTGRESDB_DATABASE=${DB_NAME}
+DB_POSTGRESDB_USER=${DB_USER}
+DB_POSTGRESDB_PASSWORD=${DB_PASSWORD}
+
+# 注意: 修改密码后，需要删除PostgreSQL数据卷并重启容器才能生效
+# docker-compose down -v && docker-compose up -d
+"
             ;;
 
         "existing_mysql")
@@ -668,7 +801,10 @@ create_env_file() {
         log_message "INFO" "[DRY-RUN] 将要创建 .env 文件，内容如下:"
         printf "%b\n" "$ENV_CONTENT"
     else
+        umask 077
         printf "%b\n" "$ENV_CONTENT" > .env
+        chmod 600 .env
+        push_rollback "rm -f .env"
         log_message "INFO" ".env 文件创建完成"
     fi
 
@@ -682,17 +818,21 @@ create_init_data_script() {
     log_message "INFO" "正在创建PostgreSQL初始化脚本 init-data.sh..."
 
     local INIT_SCRIPT_CONTENT='#!/bin/bash
-set -e;
+set -e
 
+# 等待PostgreSQL完全启动
+until pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do
+    sleep 1
+done
 
-if [ -n "${POSTGRES_NON_ROOT_USER:-}" ] && [ -n "${POSTGRES_NON_ROOT_PASSWORD:-}" ]; then
-	psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
-		CREATE USER ${POSTGRES_NON_ROOT_USER} WITH PASSWORD "${POSTGRES_NON_ROOT_PASSWORD}";
-		GRANT ALL PRIVILEGES ON DATABASE ${POSTGRES_DB} TO ${POSTGRES_NON_ROOT_USER};
-		GRANT CREATE ON SCHEMA public TO ${POSTGRES_NON_ROOT_USER};
-	EOSQL
-else
-	echo "SETUP INFO: No Environment variables given!"
+# 创建非root用户（如果环境变量设置）
+if [ -n "$POSTGRES_NON_ROOT_USER" ] && [ -n "$POSTGRES_NON_ROOT_PASSWORD" ]; then
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+        CREATE USER "$POSTGRES_NON_ROOT_USER" WITH PASSWORD '\''$POSTGRES_NON_ROOT_PASSWORD'\'';
+        GRANT ALL PRIVILEGES ON DATABASE "$POSTGRES_DB" TO "$POSTGRES_NON_ROOT_USER";
+        GRANT CREATE ON SCHEMA public TO "$POSTGRES_NON_ROOT_USER";
+EOSQL
+    echo "创建用户 '\''$POSTGRES_NON_ROOT_USER'\'' 成功"
 fi'
 
     if [ "$DRY_RUN" = true ]; then
@@ -700,7 +840,8 @@ fi'
         printf "%b\n" "$INIT_SCRIPT_CONTENT"
     else
         printf "%b\n" "$INIT_SCRIPT_CONTENT" > init-data.sh
-        chmod +x init-data.sh  # Ensure script is executable
+        chmod +x init-data.sh
+        push_rollback "rm -f init-data.sh"
         log_message "INFO" "PostgreSQL初始化脚本 init-data.sh 创建完成"
     fi
 }
@@ -782,23 +923,22 @@ volumes:
 
 services:
   postgres:
-    image: postgres:${POSTGRES_VERSION}
+    image: postgres:${POSTGRES_VERSION:-16} # 使用变量，有默认值
     restart: always
     environment:
-      - POSTGRES_USER
-      - POSTGRES_PASSWORD
-      - POSTGRES_DB
-      - POSTGRES_NON_ROOT_USER
-      - POSTGRES_NON_ROOT_PASSWORD
+      POSTGRES_USER: \${POSTGRES_USER:-postgres} # 从.env读取，有默认值
+      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD}    # 必须从.env设置
+      POSTGRES_DB: \${POSTGRES_DB:-n8n}            # 从.env读取，有默认值
+      POSTGRES_NON_ROOT_USER: \${POSTGRES_NON_ROOT_USER:-postgres}
+      POSTGRES_NON_ROOT_PASSWORD: \${POSTGRES_NON_ROOT_PASSWORD}
     volumes:
       - db_storage:/var/lib/postgresql/data
       - ./init-data.sh:/docker-entrypoint-initdb.d/init-data.sh
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -h localhost -U \${POSTGRES_USER} -d \${POSTGRES_DB}']
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U \${POSTGRES_USER:-postgres}"]
+      interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 5
 
   n8n:
     image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
@@ -970,7 +1110,10 @@ create_docker_compose_file() {
         log_message "INFO" "[DRY-RUN] 将要创建 docker-compose.yml 文件，内容如下:"
         printf "%b\n" "$content"
     else
+        umask 022
         printf "%b\n" "$content" > docker-compose.yml
+        chmod 644 docker-compose.yml
+        push_rollback "rm -f docker-compose.yml"
         log_message "INFO" "docker-compose.yml 文件创建完成"
     fi
 }
@@ -984,6 +1127,7 @@ create_n8n_data_directory() {
     log_message "INFO" "================================================================="
     log_message "INFO" "正在创建 n8n_data 目录..."
     execute "mkdir -p ./n8n_data"
+    push_rollback "rm -rf ./n8n_data"
 }
 
 # 启动服务函数
@@ -993,8 +1137,9 @@ start_services() {
     log_message "INFO" "================================================================="
     log_message "INFO" "                          步骤: 服务启动"
     log_message "INFO" "================================================================="
-    log_message "INFO" "正在使用 Docker Compose 启动 n8n..."
-    execute "docker-compose up -d"
+    log_message "INFO" "正在使用 ${DOCKER_COMPOSE_CMD} 启动 n8n..."
+    execute "${DOCKER_COMPOSE_CMD} up -d"
+    push_rollback "${DOCKER_COMPOSE_CMD} down -v"
 
     # 等待服务启动
     show_progress "正在等待 n8n 服务启动" 10
@@ -1003,9 +1148,34 @@ start_services() {
     log_message "INFO" "您可以通过 http://${N8N_HOST}:${N8N_PORT} 访问 n8n"
 
     log_message "INFO" "有用的 Docker 命令:"
-    log_message "INFO" "- 停止 n8n: docker-compose down"
-    log_message "INFO" "- 重启 n8n: docker-compose restart"
-    log_message "INFO" "- 查看日志: docker-compose logs -f"
+    log_message "INFO" "- 停止 n8n: ${DOCKER_COMPOSE_CMD} down"
+    log_message "INFO" "- 重启 n8n: ${DOCKER_COMPOSE_CMD} restart"
+    log_message "INFO" "- 查看日志: ${DOCKER_COMPOSE_CMD} logs -f"
+
+    # 验证安装
+    verify_installation
+}
+
+# 新增: 验证服务健康状态
+verify_installation() {
+    log_message "INFO" "正在验证服务状态..."
+    local max_retries=30
+    local retry_count=0
+
+    while [ $retry_count -lt $max_retries ]; do
+        if curl ${CURL_COMMON_OPTS} http://${N8N_HOST}:${N8N_PORT}/healthz 2>/dev/null | grep -q '"status":"ok"'; then
+            log_message "INFO" "✅ n8n 服务运行正常!"
+            return 0
+        fi
+
+        log_message "DEBUG" "等待 n8n 启动... ($((retry_count+1))/$max_retries)"
+        sleep 2
+        retry_count=$((retry_count+1))
+    done
+
+    log_message "WARN" "⚠️  n8n 服务启动较慢，正在继续等待..."
+    log_message "INFO" "请手动检查服务状态: ${DOCKER_COMPOSE_CMD} logs n8n"
+    return 0
 }
 
 # SQLite 数据库配置函数
@@ -1044,7 +1214,7 @@ configure_database_postgresql() {
     log_message "INFO" "                     PostgreSQL 数据库配置"
     log_message "INFO" "================================================================="
     
-    if [ "$PG_INSTALLED" = true ]; then
+    if [ "$PG_INSTALLED" = true ] && [ "$NON_INTERACTIVE" != true ]; then
         log_message "INFO" "检测到本地已安装 PostgreSQL!"
         log_message "INFO" "请选择 PostgreSQL 数据库使用方式:"
         log_message "INFO" "1) 使用本地已安装的 PostgreSQL"
@@ -1057,7 +1227,15 @@ configure_database_postgresql() {
         log_message "INFO" "请选择 PostgreSQL 数据库使用方式:"
         log_message "INFO" "1) 使用自定义的 PostgreSQL (外部或远程)"
         log_message "INFO" "2) 通过 Docker 安装 PostgreSQL (推荐)"
-        read -p "请输入您的选择 (1/2，默认: 2): " DB_CHOICE_TMP
+        if [ "$NON_INTERACTIVE" = true ] && [ -n "$PRESET_DB" ]; then
+            if [ "$PRESET_DB" = "postgres_existing" ]; then
+                DB_CHOICE_TMP="1" # 选择自定义/外部
+            else
+                DB_CHOICE_TMP="2" # 选择Docker
+            fi
+        else
+            read -p "请输入您的选择 (1/2，默认: 2): " DB_CHOICE_TMP
+        fi
         DB_CHOICE=${DB_CHOICE_TMP:-2}
         
         # 调整选项编号以匹配下面的case语句
@@ -1075,17 +1253,28 @@ configure_database_postgresql() {
         3)  # 通过 Docker 安装 PostgreSQL
             log_message "INFO" "将使用 Docker 自动安装 PostgreSQL 数据库..."
             log_message "INFO" "正在设置默认数据库配置 (可在 .env 文件中修改):"
-            
-            # 自动设置默认值，无需用户输入
-            local_db_host="localhost"
+
+            # 直接设置容器内主机名为服务名，无需询问
+            local_db_host="postgres" # 这是Docker Compose中的服务名
             local_db_port="5432"
-            local_db_name="n8n"
-            local_db_user="postgres"
-            
+            # 可以在这里提供默认值，并允许用户修改
+            if [ "$NON_INTERACTIVE" = true ]; then
+                local_db_name="n8n"
+            else
+                read -p "数据库名称 (默认: n8n): " local_db_name
+            fi
+            local_db_name=${local_db_name:-n8n}
+            if [ "$NON_INTERACTIVE" = true ]; then
+                local_db_user="postgres"
+            else
+                read -p "数据库用户 (默认: postgres): " local_db_user
+            fi
+            local_db_user=${local_db_user:-postgres}
+
             # 自动生成随机密码
             local_db_password=$(openssl rand -base64 12)
-            
-            log_message "INFO" "PostgreSQL 数据库信息: 数据库主机: $local_db_host"
+
+            log_message "INFO" "PostgreSQL 数据库信息: 数据库主机: postgres (Docker Compose服务名)"
             log_message "INFO" "PostgreSQL 数据库信息: 数据库端口: $local_db_port"
             log_message "INFO" "PostgreSQL 数据库信息: 数据库名称: $local_db_name"
             log_message "INFO" "PostgreSQL 数据库信息: 数据库用户: $local_db_user"
@@ -1100,11 +1289,19 @@ configure_database_postgresql() {
             # 根据用户选择设置不同的默认值和提示信息
             case $DB_CHOICE in
                 1)  # 使用本地已安装的 PostgreSQL
-                    read -p "数据库主机 (默认: localhost): " local_db_host
+                    if [ "$NON_INTERACTIVE" = true ]; then
+                        local_db_host="localhost"
+                    else
+                        read -p "数据库主机 (默认: localhost): " local_db_host
+                    fi
                     local_db_host=${local_db_host:-localhost}
                     ;;
                 2)  # 使用自定义的 PostgreSQL (外部或远程)
-                    read -p "数据库主机 (必填): " local_db_host
+                    if [ "$NON_INTERACTIVE" = true ]; then
+                        local_db_host="postgres"
+                    else
+                        read -p "数据库主机 (必填): " local_db_host
+                    fi
                     while [ -z "$local_db_host" ]; do
                         log_message "ERROR" "数据库主机不能为空!"
                         read -p "数据库主机 (必填): " local_db_host
@@ -1115,7 +1312,11 @@ configure_database_postgresql() {
 
             # 验证数据库端口
             while true; do
-                read -p "数据库端口 (默认: 5432): " local_db_port_tmp
+                if [ "$NON_INTERACTIVE" = true ]; then
+                    local_db_port_tmp=""
+                else
+                    read -p "数据库端口 (默认: 5432): " local_db_port_tmp
+                fi
                 local_db_port=${local_db_port_tmp:-5432}  # 设置默认端口
 
                 if validate_input "port" "$local_db_port" "数据库端口"; then
@@ -1126,7 +1327,11 @@ configure_database_postgresql() {
 
             # 验证数据库名称
             while true; do
-                read -p "数据库名称 (默认: n8n): " local_db_name_tmp
+                if [ "$NON_INTERACTIVE" = true ]; then
+                    local_db_name_tmp=""
+                else
+                    read -p "数据库名称 (默认: n8n): " local_db_name_tmp
+                fi
                 local_db_name=${local_db_name_tmp:-n8n}  # 设置默认数据库名称
 
                 if validate_input "database_name" "$local_db_name" "数据库名称"; then
@@ -1138,11 +1343,19 @@ configure_database_postgresql() {
             # 设置默认用户
             case $DB_CHOICE in
                 1)  # 使用本地已安装的 PostgreSQL
-                    read -p "数据库用户 (默认: postgres): " local_db_user
+                    if [ "$NON_INTERACTIVE" = true ]; then
+                        local_db_user=""
+                    else
+                        read -p "数据库用户 (默认: postgres): " local_db_user
+                    fi
                     local_db_user=${local_db_user:-postgres}
                     ;;
                 2)  # 使用自定义的 PostgreSQL (外部或远程)
-                    read -p "数据库用户 (必填): " local_db_user
+                    if [ "$NON_INTERACTIVE" = true ]; then
+                        local_db_user="postgres"
+                    else
+                        read -p "数据库用户 (必填): " local_db_user
+                    fi
                     while [ -z "$local_db_user" ]; do
                         log_message "ERROR" "数据库用户不能为空!"
                         read -p "数据库用户 (必填): " local_db_user
@@ -1196,11 +1409,11 @@ configure_database_mysql() {
     fi
 
     # 如果本地已安装 MySQL，询问用户选择
-    if [ "$MYSQL_INSTALLED" = true ]; then
+    if [ "$MYSQL_INSTALLED" = true ] && [ "$NON_INTERACTIVE" != true ]; then
         log_message "INFO" "检测到本地已安装 MySQL/MariaDB!"
         while true; do
-            read -p "是否使用已安装的 MySQL/MariaDB？(y/n，默认: n): " USE_EXISTING_MYSQL_TMP
-            USE_EXISTING_MYSQL=${USE_EXISTING_MYSQL_TMP:-n}
+        read -p "是否使用已安装的 MySQL/MariaDB？(y/n，默认: n): " USE_EXISTING_MYSQL_TMP
+        USE_EXISTING_MYSQL=${USE_EXISTING_MYSQL_TMP:-n}
 
             if validate_input "yes_no" "$USE_EXISTING_MYSQL" "使用已安装的 MySQL/MariaDB"; then
                 log_message "INFO" "是否使用已安装的 MySQL/MariaDB: $USE_EXISTING_MYSQL"
@@ -1213,13 +1426,21 @@ configure_database_mysql() {
     if [ "$USE_EXISTING_MYSQL" = "y" ] || [ "$USE_EXISTING_MYSQL" = "Y" ]; then
         # 使用已安装的 MySQL/MariaDB
         log_message "INFO" "请输入 MySQL 数据库信息:"
-        read -p "数据库主机 (默认: localhost): " local_db_host
+        if [ "$NON_INTERACTIVE" = true ]; then
+            local_db_host="localhost"
+        else
+            read -p "数据库主机 (默认: localhost): " local_db_host
+        fi
         local_db_host=${local_db_host:-localhost}  # 设置默认主机为 localhost
         log_message "INFO" "MySQL 数据库信息: 数据库主机: $local_db_host"
 
         # 验证数据库端口
         while true; do
-            read -p "数据库端口 (默认: 3306): " local_db_port_tmp
+            if [ "$NON_INTERACTIVE" = true ]; then
+                local_db_port_tmp=""
+            else
+                read -p "数据库端口 (默认: 3306): " local_db_port_tmp
+            fi
             local_db_port=${local_db_port_tmp:-3306}  # 设置默认端口
 
             if validate_input "port" "$local_db_port" "数据库端口"; then
@@ -1230,7 +1451,11 @@ configure_database_mysql() {
 
         # 验证数据库名称
         while true; do
-            read -p "数据库名称 (默认: n8n): " local_db_name_tmp
+            if [ "$NON_INTERACTIVE" = true ]; then
+                local_db_name_tmp=""
+            else
+                read -p "数据库名称 (默认: n8n): " local_db_name_tmp
+            fi
             local_db_name=${local_db_name_tmp:-n8n}  # 设置默认数据库名称
 
             if validate_input "database_name" "$local_db_name" "数据库名称"; then
@@ -1239,28 +1464,43 @@ configure_database_mysql() {
             fi
         done
 
-        read -p "数据库用户 (默认: root): " local_db_user
+        if [ "$NON_INTERACTIVE" = true ]; then
+            local_db_user=""
+        else
+            read -p "数据库用户 (默认: root): " local_db_user
+        fi
         local_db_user=${local_db_user:-root}  # 设置默认用户
         log_message "INFO" "MySQL 数据库信息: 数据库用户: $local_db_user"
 
-        local_db_password=$(read_password)
+        if [ "$NON_INTERACTIVE" = true ]; then
+            local_db_password=$(openssl rand -base64 12)
+        else
+            local_db_password=$(read_password)
+        fi
         log_message "INFO" "MySQL 数据库信息: 数据库密码: ****"
         printf "\n\n"
     else
         # 通过 Docker 安装 MySQL
         log_message "INFO" "将使用 Docker 自动安装 MySQL 数据库..."
         log_message "INFO" "正在设置默认数据库配置 (可在 .env 文件中修改):"
-        
-        # 自动设置默认值，无需用户输入
-        local_db_host="localhost"
+
+        # 直接设置容器内主机名为服务名，无需询问
+        local_db_host="mysql" # 这是Docker Compose中的服务名
         local_db_port="3306"
-        local_db_name="n8n"
+        # 可以在这里提供默认值，并允许用户修改
+        if [ "$NON_INTERACTIVE" = true ]; then
+            local_db_name="n8n"
+        else
+            read -p "数据库名称 (默认: n8n): " local_db_name
+        fi
+        local_db_name=${local_db_name:-n8n}
+        # MySQL Docker默认使用root用户
         local_db_user="root"
-        
+
         # 自动生成随机密码
         local_db_password=$(openssl rand -base64 12)
-        
-        log_message "INFO" "MySQL 数据库信息: 数据库主机: $local_db_host"
+
+        log_message "INFO" "MySQL 数据库信息: 数据库主机: mysql (Docker Compose服务名)"
         log_message "INFO" "MySQL 数据库信息: 数据库端口: $local_db_port"
         log_message "INFO" "MySQL 数据库信息: 数据库名称: $local_db_name"
         log_message "INFO" "MySQL 数据库信息: 数据库用户: $local_db_user"
@@ -1500,7 +1740,18 @@ configure_database() {
     log_message "INFO" "1) SQLite (默认，无需凭证)"
     log_message "INFO" "2) PostgreSQL (需要数据库凭证)"
     log_message "INFO" "3) MySQL (需要数据库凭证)"
-    read -p "请输入您的选择 (1/2/3): " DB_CHOICE
+    if [ "$NON_INTERACTIVE" = true ] && [ -n "$PRESET_DB" ]; then
+        case "$PRESET_DB" in
+            sqlite) DB_CHOICE="1" ;;
+            postgres_existing) DB_CHOICE="2" ;;
+            postgres_docker) DB_CHOICE="2" ;;
+            mysql_existing) DB_CHOICE="3" ;;
+            mysql_docker) DB_CHOICE="3" ;;
+            *) DB_CHOICE="1" ;;
+        esac
+    else
+        read -p "请输入您的选择 (1/2/3): " DB_CHOICE
+    fi
     log_message "INFO" "请选择数据库类型: $DB_CHOICE"
 
     case $DB_CHOICE in
@@ -1529,23 +1780,40 @@ configure_n8n_parameters() {
     log_message "INFO" "================================================================="
     
     # 配置N8N_HOST
-    log_message "INFO" "请输入N8N主机名 (默认: ${N8N_HOST}):"
-    read -p "N8N主机名: " USER_HOST
-    if [ -n "$USER_HOST" ]; then
-        N8N_HOST="$USER_HOST"
+    if [ "$NON_INTERACTIVE" = true ]; then
+        :
+    else
+        log_message "INFO" "请输入N8N主机名 (默认: ${N8N_HOST}):"
+        read -p "N8N主机名: " USER_HOST
+        if [ -n "$USER_HOST" ]; then
+            N8N_HOST="$USER_HOST"
+        fi
     fi
     log_message "INFO" "N8N主机名设置为: ${N8N_HOST}"
     
     # 配置N8N_PORT
-    log_message "INFO" "请输入N8N端口 (默认: ${N8N_PORT}):"
-    read -p "N8N端口: " USER_PORT
-    if [ -n "$USER_PORT" ]; then
-        N8N_PORT="$USER_PORT"
+    if [ "$NON_INTERACTIVE" = true ]; then
+        :
+    else
+        log_message "INFO" "请输入N8N端口 (默认: ${N8N_PORT}):"
+        read -p "N8N端口: " USER_PORT
+        if [ -n "$USER_PORT" ]; then
+            N8N_PORT="$USER_PORT"
+        fi
     fi
     log_message "INFO" "N8N端口设置为: ${N8N_PORT}"
-    
-    # 在这里可以添加更多n8n参数配置
+    if ! ensure_port_free "$N8N_PORT"; then
+        while true; do
+            read -p "端口 ${N8N_PORT} 已占用，请输入新的端口: " NEW_PORT
+            if validate_input "port" "$NEW_PORT" "N8N端口" && ensure_port_free "$NEW_PORT"; then
+                N8N_PORT="$NEW_PORT"
+                log_message "INFO" "N8N端口更新为: ${N8N_PORT}"
+                break
+            fi
+        done
+    fi
 }
+    # 在这里可以添加更多n8n参数配置
 
 # 安装完成提示函数
 # 参数: 无
