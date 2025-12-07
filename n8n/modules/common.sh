@@ -32,3 +32,59 @@ service_health_check() {
     curl -s "http://127.0.0.1:${port}" >/dev/null || print_warn "HTTP 检查失败，稍后重试或手动验证"
   fi
 }
+
+has_whiptail() { command -v whiptail >/dev/null 2>&1; }
+
+ask_menu() {
+  local title="$1"; shift
+  local prompt="$1"; shift
+  local choices=("$@")
+  if has_whiptail; then
+    local args=()
+    for c in "${choices[@]}"; do args+=("$c" "$c"); done
+    whiptail --title "$title" --menu "$prompt" 20 70 10 "${args[@]}" 3>&1 1>&2 2>&3
+  else
+    printf "%s\n" "$prompt"
+    select sel in "${choices[@]}"; do echo "$sel"; break; done
+  fi
+}
+
+ask_input() {
+  local title="$1"; shift
+  local prompt="$1"; shift
+  local default_val="${1:-}"; shift || true
+  if has_whiptail; then
+    local out
+    out=$(whiptail --title "$title" --inputbox "$prompt" 10 70 "$default_val" 3>&1 1>&2 2>&3) || true
+    printf "%s" "$out"
+  else
+    if [[ -n "$default_val" ]]; then
+      read -r -p "$prompt [$default_val]: " ans; printf "%s" "${ans:-$default_val}"
+    else
+      read -r -p "$prompt: " ans; printf "%s" "$ans"
+    fi
+  fi
+}
+
+ask_secret() {
+  local title="$1"; shift
+  local prompt="$1"; shift
+  if has_whiptail; then
+    local out
+    out=$(whiptail --title "$title" --passwordbox "$prompt" 10 70 3>&1 1>&2 2>&3) || true
+    printf "%s" "$out"
+  else
+    read -r -s -p "$prompt: " ans; echo; printf "%s" "$ans"
+  fi
+}
+
+confirm_yes() {
+  local prompt="$1"; shift
+  if has_whiptail; then
+    whiptail --yesno "$prompt" 8 60; return $?
+  else
+    read -r -p "$prompt [y/N]: " ans; [[ "$ans" =~ ^[Yy]$ ]]
+  fi
+}
+
+print_cmd() { echo "[CMD] $*"; }
